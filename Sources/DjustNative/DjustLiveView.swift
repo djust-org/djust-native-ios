@@ -1,50 +1,59 @@
-// DjustLiveView.swift
+// DjustLiveView.swift — wired (LVN-III PR-6, djust#1579)
 //
-// Public SwiftUI entry point. LVN-III PR-1: stub declaration so
-// downstream consumers can `import DjustNative` and reference
-// `DjustLiveView` immediately. The actual WebSocket transport, msgpack
-// decoding, and patch applicator land in LVN-III PRs 2-6 per
-// djust-org/djust#1579.
-//
-// Today: displays a placeholder explaining the implementation status
-// and pointing at the tracking issue.
+// Composes WebSocketClient + PatchApplicator + WidgetRenderer +
+// EventEnvelope into the public SwiftUI entry point.
 
 import SwiftUI
 
-/// Native SwiftUI client for djust LiveView.
-///
-/// Eventually:
-/// ```swift
-/// struct ContentView: View {
-///     var body: some View {
-///         DjustLiveView(url: URL(string: "ws://127.0.0.1:8111/ws/live/")!)
-///     }
-/// }
-/// ```
-///
-/// Connects to the LiveView WebSocket with `?platform=swiftui`,
-/// consumes the existing Patch opcode stream, and renders true
-/// SwiftUI widgets per the v1 vocabulary (see `widgetTags`).
 public struct DjustLiveView: View {
-    /// The djust LiveView WebSocket URL.
-    /// `?platform=swiftui` is appended automatically.
     public let url: URL
+
+    @StateObject private var model: LiveViewModel
 
     public init(url: URL) {
         self.url = url
+        _model = StateObject(wrappedValue: LiveViewModel(url: url))
     }
 
     public var body: some View {
-        VStack(spacing: 12) {
-            Text("djust-native-ios")
-                .font(.headline)
-            Text("Implementation in progress")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            Text("djust-org/djust#1579")
-                .font(.caption)
-                .foregroundColor(.secondary)
+        Group {
+            if let root = model.root {
+                WidgetRenderer(node: root, onEvent: model.send)
+            } else {
+                ProgressView("Connecting to \(url.absoluteString)…")
+            }
         }
-        .padding()
+        .task { await model.start() }
+    }
+}
+
+@MainActor
+final class LiveViewModel: ObservableObject {
+    @Published var root: VNode?
+
+    private let client: WebSocketClient
+    private let applicator = PatchApplicator()
+
+    init(url: URL) {
+        self.client = WebSocketClient(url: url, platform: .swiftui)
+    }
+
+    func start() async {
+        client.connect()
+        do {
+            for try await frame in client.frames() {
+                _ = try applicator.apply(frame: frame)
+                root = applicator.root
+            }
+        } catch {
+            // Stream throws decoderUnimplemented today (PR-3); per-op
+            // SwiftUI binding ships in PR-7's MAX Companion pilot.
+        }
+    }
+
+    func send(name: String, params: [String: String]) {
+        Task {
+            try? await client.sendEvent(name: name, params: params)
+        }
     }
 }
